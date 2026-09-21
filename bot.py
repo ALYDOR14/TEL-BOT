@@ -92,7 +92,7 @@ async def receive_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     start = context.user_data["start"]
 
     # اگر عدد کوچیک داد، احتمالاً مدت زمانه
-    if end_sec <= 10 and end_sec > 0:
+    if end_sec <= 15 and end_sec > 0:
         duration = end_sec
     else:
         duration = end_sec - start
@@ -101,15 +101,18 @@ async def receive_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("مدت زمان باید بیشتر از صفر باشه.")
         return WAITING_END
 
-    if duration > 3.0:
-        await update.message.reply_text(
-            f"مدت زمان {duration:.1f} ثانیه است.\n"
-            "استیکر تلگرام حداکثر ۳ ثانیه می‌تونه باشه.\n"
-            "لطفاً مدت کوتاه‌تری انتخاب کن."
-        )
-        return WAITING_END
+    # ذخیره مدت زمان اصلی
+    context.user_data["duration"] = duration
 
-    await update.message.reply_text("دارم ویدیو رو دانلود و تبدیل می‌کنم... صبر کن ⏳")
+    if duration > 2.9:
+        speed = duration / 2.9
+        await update.message.reply_text(
+            f"مدت زمان انتخابی {duration:.1f} ثانیه است.\n"
+            f"ویدیو با سرعت {speed:.1f} برابر تند می‌شه تا در ۲.۹ ثانیه جا بشه...\n"
+            "در حال پردازش، لطفاً صبر کن ⏳"
+        )
+    else:
+        await update.message.reply_text("دارم ویدیو رو دانلود و تبدیل می‌کنم... صبر کن ⏳")
 
     try:
         webm_path = await process_video(
@@ -132,7 +135,6 @@ async def receive_end(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data.clear()
     return ConversationHandler.END
 
-
 async def process_video(url: str, start: float, duration: float, user_id: int) -> str:
     temp_dir = Path(tempfile.gettempdir()) / f"tg_sticker_{user_id}"
     temp_dir.mkdir(exist_ok=True)
@@ -150,7 +152,6 @@ async def process_video(url: str, start: float, duration: float, user_id: int) -
         info = ydl.extract_info(url, download=True)
         downloaded_file = ydl.prepare_filename(info)
 
-        # اگر فایل با پسوند دیگه ساخته شده باشه
         if not os.path.exists(downloaded_file):
             possible = list(temp_dir.glob("original.*"))
             if possible:
@@ -160,25 +161,40 @@ async def process_video(url: str, start: float, duration: float, user_id: int) -
 
     output_file = str(temp_dir / "sticker.webm")
 
-    # تبدیل با FFmpeg
+    # محاسبه سرعت
+    max_duration = 2.9
+    if duration > max_duration:
+        speed = duration / max_duration
+        # setpts برای تند کردن ویدیو
+        pts_filter = f"setpts=PTS/{speed}"
+        output_duration = max_duration
+    else:
+        speed = 1.0
+        pts_filter = "setpts=PTS-STARTPTS"
+        output_duration = duration
+
+    # فیلتر کامل
+    vf = f"{pts_filter},scale='if(eq(a,1),512,if(gt(a,1),512,-2))':'if(eq(a,1),512,if(gt(a,1),-2,512))'"
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start),
-        "-t", str(duration),
+        "-t", str(duration),          # اول قسمت مورد نظر رو برش بزن
         "-i", downloaded_file,
-        "-vf", "scale='if(eq(a,1),512,if(gt(a,1),512,-2))':'if(eq(a,1),512,if(gt(a,1),-2,512))'",
+        "-vf", vf,
         "-c:v", "libvpx-vp9",
         "-an",
         "-crf", "32",
         "-b:v", "0",
         "-r", "30",
+        "-t", str(output_duration),   # مدت نهایی خروجی
         "-pix_fmt", "yuva420p",
         output_file
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise Exception(f"FFmpeg error:\n{result.stderr[-600:]}")
+        raise Exception(f"FFmpeg error:\n{result.stderr[-700:]}")
 
     size_kb = os.path.getsize(output_file) / 1024
     if size_kb > 256:
@@ -190,14 +206,12 @@ async def process_video(url: str, start: float, duration: float, user_id: int) -
     if size_kb > 280:
         raise Exception(f"حجم فایل هنوز بالاست ({size_kb:.0f} KB). ویدیو خیلی پیچیده است.")
 
-    # پاک کردن فایل اصلی
     try:
         os.remove(downloaded_file)
     except:
         pass
 
     return output_file
-
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
